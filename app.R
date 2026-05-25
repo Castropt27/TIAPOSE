@@ -8,6 +8,8 @@ library(shiny)
 library(ggplot2)
 library(dplyr)
 library(tidyr)
+library(forecast)
+library(gridExtra)
 
 # Garante diretório de trabalho correto
 if (!file.exists("R/data_helpers.R")) {
@@ -57,6 +59,45 @@ ui <- navbarPage(
       .msg-ok      { background: #d5f5e3; border-left: 4px solid #27ae60;
                      padding: 10px; border-radius: 4px; color: #1e8449; margin-bottom:10px; }
     "))
+  ),
+
+  # ===========================================================
+  # ABA 3 — EDA
+  # ===========================================================
+  tabPanel(
+    "📊 EDA",
+    sidebarLayout(
+      sidebarPanel(
+        width = 3,
+        div(class = "section-title", "Exploração de Dados (EDA)"),
+        selectInput("eda_store", "Escolher Loja",
+          choices = c("Todas" = "all", "Baltimore" = "baltimore", "Lancaster" = "lancaster", "Philadelphia" = "philadelphia", "Richmond" = "richmond"),
+          selected = "all"),
+        dateRangeInput("eda_dates", "Intervalo de Datas", start = NULL, end = NULL),
+        br(),
+        actionButton("eda_run", "▶  Gerar EDA", class = "btn-primary", style = "width:100%"),
+        br(), br(),
+        div(class = "msg-info", "Os gráficos são gerados a partir dos ficheiros em /data/*.csv")
+      ),
+      mainPanel(
+        width = 9,
+        fluidRow(column(12, div(class = "section-title", "Séries Temporais"))),
+        fluidRow(column(6, plotOutput("eda_ts_customers", height = "300px")),
+                 column(6, plotOutput("eda_ts_sales", height = "300px"))),
+        hr(),
+        fluidRow(column(12, div(class = "section-title", "Histogramas"))),
+        fluidRow(column(6, plotOutput("eda_hist_customers", height = "300px")),
+                 column(6, plotOutput("eda_hist_sales", height = "300px"))),
+        hr(),
+        fluidRow(column(12, div(class = "section-title", "Boxplots e Relações"))),
+        fluidRow(column(6, plotOutput("eda_boxplots", height = "300px")),
+                 column(6, plotOutput("eda_scatter_relations", height = "300px"))),
+        hr(),
+        fluidRow(column(12, div(class = "section-title", "Sazonalidade / Decomposição / ACF-PACF"))),
+        fluidRow(column(6, plotOutput("eda_season_plot", height = "350px")),
+                 column(6, plotOutput("eda_decompose_acf", height = "350px")))
+      )
+    )
   ),
 
   # ===========================================================
@@ -482,6 +523,90 @@ server <- function(input, output, session) {
                   rownames=FALSE, class="table-striped table-hover") |>
       DT::formatRound(c("Vendas","Custos","Lucro"), digits=2) |>
       DT::formatStyle("Lucro", color=DT::styleInterval(0, c("red","green")))
+  })
+
+  # ===========================================================
+  # EDA — Server logic
+  # ===========================================================
+  eda_df <- reactiveVal(NULL)
+
+  observeEvent(input$eda_run, {
+    # Load data depending on selection
+    store <- input$eda_store
+    tryCatch({
+      if (store == "all") {
+        files <- list.files("data", pattern = "\\.csv$", full.names = TRUE)
+        dfs <- lapply(files, function(f) {
+          df <- read.csv(f, stringsAsFactors = FALSE)
+          df$Date <- as.Date(df$Date)
+          df$Store <- tools::file_path_sans_ext(basename(f))
+          df
+        })
+        df_all <- dplyr::bind_rows(dfs)
+      } else {
+        f <- file.path("data", paste0(store, ".csv"))
+        df_all <- read.csv(f, stringsAsFactors = FALSE)
+        df_all$Date <- as.Date(df_all$Date)
+        df_all$Store <- store
+      }
+      if (!is.null(input$eda_dates) && !is.na(input$eda_dates[1])) {
+        dr <- input$eda_dates
+        df_all <- df_all[df_all$Date >= as.Date(dr[1]) & df_all$Date <= as.Date(dr[2]), ]
+      }
+      eda_df(df_all)
+    }, error = function(e) {
+      eda_df(NULL)
+    })
+  })
+
+  output$eda_ts_customers <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    ggplot(df, aes(Date, Num_Customers, color = Store, group = Store)) + geom_line() + theme_minimal() + labs(x="Data", y="Num_Customers")
+  })
+
+  output$eda_ts_sales <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    ggplot(df, aes(Date, Sales, color = Store, group = Store)) + geom_line() + theme_minimal() + labs(x="Data", y="Sales")
+  })
+
+  output$eda_hist_customers <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    ggplot(df, aes(Num_Customers)) + geom_histogram(bins = 30, fill = "#2980b9", color = "white") + theme_minimal()
+  })
+
+  output$eda_hist_sales <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    ggplot(df, aes(Sales)) + geom_histogram(bins = 30, fill = "#27ae60", color = "white") + theme_minimal()
+  })
+
+  output$eda_boxplots <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    p1 <- ggplot(df, aes(y = Num_Customers)) + geom_boxplot(fill="#f39c12") + theme_minimal() + labs(y = "Num_Customers")
+    p2 <- ggplot(df, aes(y = Sales)) + geom_boxplot(fill="#2980b9") + theme_minimal() + labs(y = "Sales")
+    gridExtra::grid.arrange(p1, p2, ncol = 1)
+  })
+
+  output$eda_scatter_relations <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    p1 <- ggplot(df, aes(Num_Customers, Sales)) + geom_point(alpha = 0.6) + geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+    p2 <- ggplot(df, aes(Pct_On_Sale, Sales)) + geom_point(alpha = 0.6) + geom_smooth(method = "lm", se = FALSE) + theme_minimal()
+    gridExtra::grid.arrange(p1, p2, ncol = 1)
+  })
+
+  output$eda_season_plot <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    ts_customers <- ts(df$Num_Customers, frequency = 7)
+    forecast::seasonplot(ts_customers, year.labels = TRUE, main = "Season Plot - Num_Customers", ylab = "Num_Customers")
+  })
+
+  output$eda_decompose_acf <- renderPlot({
+    df <- eda_df(); if (is.null(df)) return(NULL)
+    ts_customers <- ts(df$Num_Customers, frequency = 7)
+    par(mfrow = c(2,2))
+    plot(decompose(ts_customers), main = "Decomposition - Num_Customers")
+    Acf(ts_customers, main = "ACF - Num_Customers")
+    Pacf(ts_customers, main = "PACF - Num_Customers")
+    par(mfrow = c(1,1))
   })
 }
 
