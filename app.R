@@ -603,7 +603,8 @@ server <- function(input, output, session) {
     df <- eda_df(); if (is.null(df)) return(NULL)
     ts_customers <- ts(df$Num_Customers, frequency = 7)
     par(mfrow = c(2,2))
-    plot(decompose(ts_customers), main = "Decomposition - Num_Customers")
+    # plot.decompose already controls titles internally; avoid passing 'main' twice
+    plot(decompose(ts_customers))
     Acf(ts_customers, main = "ACF - Num_Customers")
     Pacf(ts_customers, main = "PACF - Num_Customers")
     par(mfrow = c(1,1))
