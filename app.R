@@ -191,18 +191,6 @@ ui <- navbarPage(
             "Richmond"     = "richmond"
           ), selected = "baltimore"),
 
-        selectInput("cmp_week", "Semana",
-          choices = c(
-            "Última semana"    = "ultima",
-            "Penúltima semana" = "penultima"
-          )),
-
-        checkboxInput("cmp_use_index", "Escolher por índice", value = FALSE),
-        conditionalPanel(
-          condition = "input.cmp_use_index == true",
-          numericInput("cmp_week_idx", "Índice da Semana", value = 82, min = 2, max = 200, step = 1)
-        ),
-
         selectInput("cmp_metric", "Métrica principal",
           choices = c("RMSE" = "RMSE", "MAE" = "MAE", "NMAE" = "NMAE", "R²" = "R2"),
           selected = "RMSE"),
@@ -213,7 +201,7 @@ ui <- navbarPage(
         br(), br(),
         div(class = "msg-info",
             tags$b("Nota:"), br(),
-            "Esta página corre os 4 modelos na mesma semana e compara as métricas.")
+          "Esta página compara apenas os dois modelos usados no relatório: ARIMAX growing window e Random Forest growing window.")
       ),
 
       mainPanel(
@@ -232,7 +220,7 @@ ui <- navbarPage(
           )),
           hr(),
           fluidRow(column(12,
-            div(class = "section-title", "Valores Reais vs Previstos por Modelo"),
+            div(class = "section-title", "Evolução da métrica por iteração"),
             plotOutput("cmp_forecast_plot", height = "420px")
           ))
         )
@@ -432,19 +420,13 @@ server <- function(input, output, session) {
 
   observeEvent(input$cmp_run, {
     cmp_result(NULL)
-    week_sel <- if (input$cmp_use_index) as.character(input$cmp_week_idx) else input$cmp_week
-
     withProgress(message = "A comparar modelos...", value = 0, {
-      model_ids <- c("snaive", "arima", "ets", "rf")
-      model_labels <- c(snaive = "Seasonal Naive", arima = "ARIMA", ets = "ETS", rf = "Random Forest")
-      results <- lapply(seq_along(model_ids), function(i) {
-        setProgress(i / length(model_ids))
-        res <- run_forecast(model_ids[i], input$cmp_city, week_sel)
-        res$model_id <- model_ids[i]
-        res$model_label <- unname(model_labels[[model_ids[i]]])
-        res
-      })
-      cmp_result(list(city = input$cmp_city, week_choice = week_sel, results = results))
+      results <- list()
+      results[[1]] <- run_arimax_growing_window(input$cmp_city)
+      setProgress(0.5)
+      results[[2]] <- run_rf_growing_window(input$cmp_city)
+      setProgress(1.0)
+      cmp_result(list(city = input$cmp_city, results = results))
     })
   })
 
@@ -456,7 +438,7 @@ server <- function(input, output, session) {
   output$cmp_status_ui <- renderUI({
     r <- cmp_result()
     if (is.null(r)) {
-      return(div(class = "msg-info", "Escolhe a cidade e a semana, depois clica em 'Comparar Modelos'."))
+      return(div(class = "msg-info", "Escolhe a cidade e clica em 'Comparar Modelos'."))
     }
     ok_count <- sum(vapply(r$results, function(x) identical(x$status, "ok"), logical(1)))
     err_count <- length(r$results) - ok_count
@@ -472,15 +454,16 @@ server <- function(input, output, session) {
     r <- cmp_result(); if (is.null(r)) return(NULL)
     rows <- lapply(r$results, function(x) {
       if (!identical(x$status, "ok") || is.null(x$metrics)) {
-        return(data.frame(Modelo = x$model_label, Status = x$status, RMSE = NA, MAE = NA, NMAE = NA, R2 = NA, Erro = ifelse(is.null(x$message), NA, x$message), stringsAsFactors = FALSE))
+        return(data.frame(Modelo = x$model, Status = x$status, RMSE = NA, MAE = NA, NMAE = NA, R2 = NA, Erro = ifelse(is.null(x$message), NA, x$message), stringsAsFactors = FALSE))
       }
+      summary_row <- x$summary
       data.frame(
-        Modelo = x$model_label,
+        Modelo = x$model,
         Status = x$status,
-        RMSE = x$metrics$RMSE,
-        MAE  = x$metrics$MAE,
-        NMAE = x$metrics$NMAE,
-        R2   = x$metrics$R2,
+        RMSE = summary_row$RMSE_Mean[1],
+        MAE  = summary_row$MAE_Mean[1],
+        NMAE = summary_row$NMAE_Mean[1],
+        R2   = summary_row$R2_Mean[1],
         Erro = NA,
         stringsAsFactors = FALSE
       )
@@ -514,24 +497,24 @@ server <- function(input, output, session) {
   output$cmp_forecast_plot <- renderPlot({
     r <- cmp_result(); if (is.null(r)) return(NULL)
     rows <- lapply(r$results, function(x) {
-      if (!identical(x$status, "ok") || is.null(x$dates) || is.null(x$real) || is.null(x$predicted)) return(NULL)
+      if (!identical(x$status, "ok") || is.null(x$metrics)) return(NULL)
       data.frame(
-        Dia = x$dates,
-        Real = x$real,
-        Previsto = x$predicted,
-        Modelo = x$model_label,
+        Iteration = x$metrics$Iteration,
+        RMSE = x$metrics$RMSE,
+        MAE  = x$metrics$MAE,
+        NMAE = x$metrics$NMAE,
+        R2   = x$metrics$R2,
+        Modelo = x$model,
         stringsAsFactors = FALSE
       )
     })
     df <- dplyr::bind_rows(rows)
     if (nrow(df) == 0) return(NULL)
-    df_long <- tidyr::pivot_longer(df, c("Real", "Previsto"), names_to = "Tipo", values_to = "Clientes")
-    ggplot(df_long, aes(x = Dia, y = Clientes, color = Tipo, group = Tipo)) +
+    metric <- input$cmp_metric
+    ggplot(df, aes(x = Iteration, y = .data[[metric]], color = Modelo)) +
       geom_line(linewidth = 1) +
       geom_point(size = 1.8) +
-      facet_wrap(~ Modelo, scales = "free_y") +
-      scale_color_manual(values = c("Real" = "#2c3e50", "Previsto" = "#2980b9")) +
-      labs(x = "Data", y = "Nº Clientes", color = NULL, title = "Real vs Previsto por modelo") +
+      labs(x = "Iteração", y = metric, color = NULL, title = paste0("Evolução da métrica por iteração: ", metric)) +
       theme_minimal(base_size = 12) + theme(legend.position = "top", plot.title = element_text(face = "bold"))
   })
 
