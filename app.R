@@ -174,6 +174,73 @@ ui <- navbarPage(
   ),
 
   # ===========================================================
+  # ABA 2 — COMPARAÇÃO DE MODELOS
+  # ===========================================================
+  tabPanel(
+    "🔎 Comparar Modelos",
+    sidebarLayout(
+      sidebarPanel(
+        width = 3,
+        div(class = "section-title", "Configuração"),
+
+        selectInput("cmp_city", "Cidade",
+          choices = c(
+            "Baltimore"    = "baltimore",
+            "Lancaster"    = "lancaster",
+            "Philadelphia" = "philadelphia",
+            "Richmond"     = "richmond"
+          ), selected = "baltimore"),
+
+        selectInput("cmp_week", "Semana",
+          choices = c(
+            "Última semana"    = "ultima",
+            "Penúltima semana" = "penultima"
+          )),
+
+        checkboxInput("cmp_use_index", "Escolher por índice", value = FALSE),
+        conditionalPanel(
+          condition = "input.cmp_use_index == true",
+          numericInput("cmp_week_idx", "Índice da Semana", value = 82, min = 2, max = 200, step = 1)
+        ),
+
+        selectInput("cmp_metric", "Métrica principal",
+          choices = c("RMSE" = "RMSE", "MAE" = "MAE", "NMAE" = "NMAE", "R²" = "R2"),
+          selected = "RMSE"),
+
+        br(),
+        actionButton("cmp_run", "▶  Comparar Modelos", class = "btn-primary",
+                     style = "width:100%; font-size:14px; padding:10px;"),
+        br(), br(),
+        div(class = "msg-info",
+            tags$b("Nota:"), br(),
+            "Esta página corre os 4 modelos na mesma semana e compara as métricas.")
+      ),
+
+      mainPanel(
+        width = 9,
+        uiOutput("cmp_status_ui"),
+        conditionalPanel(
+          condition = "output.cmp_has_results",
+          fluidRow(column(12,
+            div(class = "section-title", "Resumo das Métricas"),
+            DT::dataTableOutput("cmp_table")
+          )),
+          hr(),
+          fluidRow(column(12,
+            div(class = "section-title", "Comparação da métrica selecionada"),
+            plotOutput("cmp_metric_plot", height = "320px")
+          )),
+          hr(),
+          fluidRow(column(12,
+            div(class = "section-title", "Valores Reais vs Previstos por Modelo"),
+            plotOutput("cmp_forecast_plot", height = "420px")
+          ))
+        )
+      )
+    )
+  ),
+
+  # ===========================================================
   # ABA 2 — OTIMIZAÇÃO O1 / O3
   # ===========================================================
   tabPanel(
@@ -268,48 +335,6 @@ ui <- navbarPage(
     )
   ),
 
-  # ===========================================================
-  # ABA 4 — SOBRE
-  # ===========================================================
-  tabPanel(
-    "ℹ️ Sobre",
-    fluidPage(
-      br(),
-      wellPanel(
-        h3("DSS — Decision Support System"),
-        p("Aplicação Shiny para previsão e otimização de recursos humanos e vendas."),
-        hr(),
-        h4("Estado dos Módulos"),
-        tags$table(
-          class = "table table-bordered table-hover",
-          style = "max-width: 750px;",
-          tags$thead(tags$tr(
-            tags$th("Módulo"), tags$th("Estado"), tags$th("Notas")
-          )),
-          tags$tbody(
-            tags$tr(tags$td("Seasonal Naive"),   tags$td(tags$span(style="color:green;font-weight:bold;","✔ Implementado")), tags$td("Pacote forecast")),
-            tags$tr(tags$td("ARIMA"),             tags$td(tags$span(style="color:green;font-weight:bold;","✔ Implementado")), tags$td("auto.arima, pacote forecast")),
-            tags$tr(tags$td("ETS"),               tags$td(tags$span(style="color:green;font-weight:bold;","✔ Implementado")), tags$td("Pacote forecast")),
-            tags$tr(tags$td("Random Forest"),     tags$td(tags$span(style="color:green;font-weight:bold;","✔ Implementado")), tags$td("Pacotes randomForest + zoo")),
-            tags$tr(tags$td("O1 — Maximizar Lucro"), tags$td(tags$span(style="color:green;font-weight:bold;","✔ Implementado")), tags$td("PSO interno")),
-            tags$tr(tags$td("O2 — Maximizar Lucro / RH"), tags$td(tags$span(style="color:green;font-weight:bold;","✔ Implementado")), tags$td("PSO interno")),
-            tags$tr(tags$td("O3 — Multi-objetivo"), tags$td(tags$span(style="color:orange;font-weight:bold;","⚠ Requer 'mco'")), tags$td("NSGA-II via pacote mco"))
-          )
-        ),
-        hr(),
-        h4("Pacotes necessários"),
-        tags$code("install.packages(c('shiny','ggplot2','dplyr','tidyr','DT','forecast','randomForest','zoo','mco'))"),
-        hr(),
-        h4("Parâmetros do Negócio (ajustáveis em optimization_wrappers.R)"),
-        tags$ul(
-          tags$li("Preço por unidade: 25"),
-          tags$li("Custo Junior/dia: 80 | Custo X/dia: 100 | Custo PR/unidade: 2"),
-          tags$li("Capacidade J: 6 unidades | Capacidade X: 7 unidades"),
-          tags$li("Boost PR: +10% por unidade de promoção")
-        )
-      )
-    )
-  )
 )
 
 # ============================================================
@@ -398,6 +423,116 @@ server <- function(input, output, session) {
                   rownames=FALSE, class="table-striped table-hover") |>
       DT::formatStyle("Erro",
                        color=DT::styleInterval(c(-0.001,0.001), c("red","black","green")))
+  })
+
+  # ===========================================================
+  # ABA COMPARAR MODELOS
+  # ===========================================================
+  cmp_result <- reactiveVal(NULL)
+
+  observeEvent(input$cmp_run, {
+    cmp_result(NULL)
+    week_sel <- if (input$cmp_use_index) as.character(input$cmp_week_idx) else input$cmp_week
+
+    withProgress(message = "A comparar modelos...", value = 0, {
+      model_ids <- c("snaive", "arima", "ets", "rf")
+      model_labels <- c(snaive = "Seasonal Naive", arima = "ARIMA", ets = "ETS", rf = "Random Forest")
+      results <- lapply(seq_along(model_ids), function(i) {
+        setProgress(i / length(model_ids))
+        res <- run_forecast(model_ids[i], input$cmp_city, week_sel)
+        res$model_id <- model_ids[i]
+        res$model_label <- unname(model_labels[[model_ids[i]]])
+        res
+      })
+      cmp_result(list(city = input$cmp_city, week_choice = week_sel, results = results))
+    })
+  })
+
+  output$cmp_has_results <- reactive({
+    r <- cmp_result(); !is.null(r) && length(r$results) > 0
+  })
+  outputOptions(output, "cmp_has_results", suspendWhenHidden = FALSE)
+
+  output$cmp_status_ui <- renderUI({
+    r <- cmp_result()
+    if (is.null(r)) {
+      return(div(class = "msg-info", "Escolhe a cidade e a semana, depois clica em 'Comparar Modelos'."))
+    }
+    ok_count <- sum(vapply(r$results, function(x) identical(x$status, "ok"), logical(1)))
+    err_count <- length(r$results) - ok_count
+    div(
+      class = if (err_count == 0) "msg-ok" else "msg-warning",
+      tags$b("Comparação executada — "),
+      paste0(ok_count, " modelo(s) OK"),
+      if (err_count > 0) paste0(" | ", err_count, " erro(s)") else ""
+    )
+  })
+
+  cmp_metrics_df <- reactive({
+    r <- cmp_result(); if (is.null(r)) return(NULL)
+    rows <- lapply(r$results, function(x) {
+      if (!identical(x$status, "ok") || is.null(x$metrics)) {
+        return(data.frame(Modelo = x$model_label, Status = x$status, RMSE = NA, MAE = NA, NMAE = NA, R2 = NA, Erro = ifelse(is.null(x$message), NA, x$message), stringsAsFactors = FALSE))
+      }
+      data.frame(
+        Modelo = x$model_label,
+        Status = x$status,
+        RMSE = x$metrics$RMSE,
+        MAE  = x$metrics$MAE,
+        NMAE = x$metrics$NMAE,
+        R2   = x$metrics$R2,
+        Erro = NA,
+        stringsAsFactors = FALSE
+      )
+    })
+    dplyr::bind_rows(rows)
+  })
+
+  output$cmp_table <- DT::renderDataTable({
+    df <- cmp_metrics_df(); if (is.null(df)) return(NULL)
+    DT::datatable(df, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE, class = "table-striped table-hover") |>
+      DT::formatRound(c("RMSE", "MAE", "NMAE", "R2"), digits = 4)
+  })
+
+  output$cmp_metric_plot <- renderPlot({
+    df <- cmp_metrics_df(); if (is.null(df)) return(NULL)
+    metric <- input$cmp_metric
+    df2 <- df[df$Status == "ok" & !is.na(df[[metric]]), , drop = FALSE]
+    if (nrow(df2) == 0) return(NULL)
+    df2$MetricValue <- df2[[metric]]
+    best_idx <- if (metric == "R2") which.max(df2$MetricValue) else which.min(df2$MetricValue)
+    df2$Best <- "Outros"
+    df2$Best[best_idx] <- "Melhor"
+    ggplot(df2, aes(x = reorder(Modelo, MetricValue), y = MetricValue, fill = Best)) +
+      geom_col(width = 0.7) +
+      coord_flip() +
+      scale_fill_manual(values = c("Outros" = "#95a5a6", "Melhor" = "#e74c3c")) +
+      labs(x = NULL, y = metric, title = paste0("Comparação da métrica: ", metric)) +
+      theme_minimal(base_size = 13) + theme(plot.title = element_text(face = "bold"), legend.position = "top")
+  })
+
+  output$cmp_forecast_plot <- renderPlot({
+    r <- cmp_result(); if (is.null(r)) return(NULL)
+    rows <- lapply(r$results, function(x) {
+      if (!identical(x$status, "ok") || is.null(x$dates) || is.null(x$real) || is.null(x$predicted)) return(NULL)
+      data.frame(
+        Dia = x$dates,
+        Real = x$real,
+        Previsto = x$predicted,
+        Modelo = x$model_label,
+        stringsAsFactors = FALSE
+      )
+    })
+    df <- dplyr::bind_rows(rows)
+    if (nrow(df) == 0) return(NULL)
+    df_long <- tidyr::pivot_longer(df, c("Real", "Previsto"), names_to = "Tipo", values_to = "Clientes")
+    ggplot(df_long, aes(x = Dia, y = Clientes, color = Tipo, group = Tipo)) +
+      geom_line(linewidth = 1) +
+      geom_point(size = 1.8) +
+      facet_wrap(~ Modelo, scales = "free_y") +
+      scale_color_manual(values = c("Real" = "#2c3e50", "Previsto" = "#2980b9")) +
+      labs(x = "Data", y = "Nº Clientes", color = NULL, title = "Real vs Previsto por modelo") +
+      theme_minimal(base_size = 12) + theme(legend.position = "top", plot.title = element_text(face = "bold"))
   })
 
   # ===========================================================
